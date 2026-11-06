@@ -41,6 +41,13 @@
                 <data android:scheme="http"/>
             </intent-filter>
         </activity>
+        <activity
+            android:name=".PlayerActivity"
+            android:exported="false"
+            android:configChanges="orientation|screenSize|keyboardHidden"
+            android:supportsPictureInPicture="true"
+            android:resizeableActivity="true"
+            android:screenOrientation="unspecified"/>
         <service
             android:name=".DownloadService"
             android:exported="false"
