@@ -94,7 +94,7 @@ jobs:
             sha256sum "$apk"
             ls -lh "$apk"
           done
-          (cd output && sha256sum JackDownloader-Pro-arm64.apk JackDownloader-Pro-arm32.apk > SHA256SUMS.txt)
+          (cd output && sha256sum JackDownloader-Pro-1.3-arm64.apk JackDownloader-Pro-1.3-arm32.apk > SHA256SUMS.txt)
           (cd JackDownloaderAndroid && zip -qr ../output/JackDownloader-Pro-Source.zip \
             app/src app/build.gradle settings.gradle build.gradle gradle.properties README.md)
           unzip -tqq output/JackDownloader-Pro-Source.zip
