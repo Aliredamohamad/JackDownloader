@@ -14,21 +14,23 @@ permissions:
 jobs:
   build:
     runs-on: ubuntu-latest
-    timeout-minutes: 45
+    timeout-minutes: 50
 
     steps:
       - name: Checkout repository
         uses: actions/checkout@v4
 
-      - name: Unpack Android project
+      - name: Unpack and repair source
         shell: bash
         run: |
           set -euo pipefail
           unzip -q JackDownloaderAndroid_Source.zip
           test -f JackDownloaderAndroid/app/build.gradle
           test -f JackDownloaderAndroid/settings.gradle
-          # Fix FFmpeg import in the original source archive.
           sed -i 's/com.yausername.youtubedl_android.FFmpeg/com.yausername.ffmpeg.FFmpeg/g' JackDownloaderAndroid/app/src/main/java/com/jack/downloader/MainActivity.java
+          # The upstream downloader SDK supports Android API 24 and newer.
+          sed -i 's/minSdk 26/minSdk 24/g' JackDownloaderAndroid/app/build.gradle
+          grep 'minSdk 24' JackDownloaderAndroid/app/build.gradle
 
       - name: Install JDK 17
         uses: actions/setup-java@v4
@@ -46,29 +48,59 @@ jobs:
         with:
           gradle-version: '8.11.1'
 
-      - name: Compile debug APK
-        run: gradle -p JackDownloaderAndroid :app:assembleDebug --no-daemon --stacktrace
+      - name: Build ARM64 APK (modern Android phones)
+        shell: bash
+        run: |
+          set -euo pipefail
+          sed -i "s/abiFilters 'arm64-v8a', 'armeabi-v7a', 'x86_64'/abiFilters 'arm64-v8a'/g" JackDownloaderAndroid/app/build.gradle
+          grep 'abiFilters' JackDownloaderAndroid/app/build.gradle
+          gradle -p JackDownloaderAndroid :app:assembleDebug --no-daemon --stacktrace
+          mkdir -p output
+          cp JackDownloaderAndroid/app/build/outputs/apk/debug/app-debug.apk output/JackDownloader-arm64.apk
 
-      - name: Upload debug APK
+      - name: Build ARM32 APK (older Android phones)
+        shell: bash
+        run: |
+          set -euo pipefail
+          sed -i "s/abiFilters 'arm64-v8a'/abiFilters 'armeabi-v7a'/g" JackDownloaderAndroid/app/build.gradle
+          grep 'abiFilters' JackDownloaderAndroid/app/build.gradle
+          gradle -p JackDownloaderAndroid :app:clean :app:assembleDebug --no-daemon --stacktrace
+          cp JackDownloaderAndroid/app/build/outputs/apk/debug/app-debug.apk output/JackDownloader-arm32.apk
+
+      - name: Check APK file integrity and signing
+        shell: bash
+        run: |
+          set -euo pipefail
+          APKSIGNER="$(find "$ANDROID_HOME/build-tools" -maxdepth 2 -type f -name apksigner | sort -V | tail -n 1)"
+          test -n "$APKSIGNER"
+          echo "APK signing tool: $APKSIGNER"
+          for apk in output/*.apk; do
+            test -s "$apk"
+            unzip -tqq "$apk"
+            "$APKSIGNER" verify --min-sdk-version 24 --verbose "$apk"
+            sha256sum "$apk"
+            ls -lh "$apk"
+          done
+          (cd output && sha256sum JackDownloader-arm64.apk JackDownloader-arm32.apk > SHA256SUMS.txt)
+
+      - name: Upload verified APKs
         uses: actions/upload-artifact@v4
         with:
-          name: JackDownloader-APK
-          path: JackDownloaderAndroid/app/build/outputs/apk/debug/app-debug.apk
+          name: JackDownloader-Verified-APKs
+          path: output/*
           if-no-files-found: error
           retention-days: 14
 
-      - name: Publish directly downloadable APK
+      - name: Publish direct APK files on GitHub Releases
         shell: bash
         env:
           GH_TOKEN: ${{ github.token }}
         run: |
           set -euo pipefail
-          APK="JackDownloaderAndroid/app/build/outputs/apk/debug/app-debug.apk"
-          test -s "$APK"
-          if gh release view v1.0.0 >/dev/null 2>&1; then
-            gh release upload v1.0.0 "$APK#JackDownloader.apk" --clobber
+          if gh release view v1.1.0 >/dev/null 2>&1; then
+            gh release upload v1.1.0 output/JackDownloader-arm64.apk output/JackDownloader-arm32.apk output/SHA256SUMS.txt --clobber
           else
-            gh release create v1.0.0 "$APK#JackDownloader.apk" \
-              --title "Jack Downloader v1.0.0" \
-              --notes "Download JackDownloader.apk directly from Assets. Android 8.0+. Debug build; support varies by website."
+            gh release create v1.1.0 output/JackDownloader-arm64.apk output/JackDownloader-arm32.apk output/SHA256SUMS.txt \
+              --title "Jack Downloader v1.1.0 - Smaller Android APKs" \
+              --notes "Use JackDownloader-arm64.apk for most newer Android phones, or JackDownloader-arm32.apk for older 32-bit ARM phones. Android 7.0+ (API 24). Each APK is independently signed and checked with Android apksigner and unzip. If installing over an older debug build fails, uninstall the old copy first. Only download content you are authorized to save."
           fi
