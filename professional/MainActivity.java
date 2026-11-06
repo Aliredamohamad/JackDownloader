@@ -90,6 +90,7 @@ public class MainActivity extends Activity {
     private String mediaFilter = "all";
     private boolean mediaOpened;
     private String lastSeenClipboard = "";
+    private ClipboardDownloadPrompt clipboardPrompt;
 
     private final BroadcastReceiver statusReceiver = new BroadcastReceiver() {
         @Override public void onReceive(Context context, Intent intent) {
@@ -126,6 +127,23 @@ public class MainActivity extends Activity {
         addProfessionalPanels();
         TouchEffects.installRecursively(findViewById(R.id.scrollRoot));
         animateFirstAppearance();
+        clipboardPrompt = new ClipboardDownloadPrompt(this, new ClipboardDownloadPrompt.Actions() {
+            @Override public void download(String link) {
+                urlInput.setText(link);
+                if (ready && !analyzing && !DownloadService.running) {
+                    startDownload();
+                } else {
+                    statusText.setText("الرابط جاهز • اضغط «تنزيل» عند جاهزية المحرّك");
+                }
+            }
+
+            @Override public void choose(String link) {
+                urlInput.setText(link);
+                statusText.setText("اختر الصيغة والجودة المطلوبة ثم اضغط «تنزيل»");
+                ScrollView root = findViewById(R.id.scrollRoot);
+                root.smoothScrollTo(0, dp(190));
+            }
+        });
         handleIncomingIntent(getIntent());
 
         executor.execute(() -> {
@@ -164,7 +182,20 @@ public class MainActivity extends Activity {
             showTransfer(p.getString("status", "جارٍ التنزيل..."), p.getInt("progress", 0), true);
         } else updateActions();
         urlInput.postDelayed(() -> pasteLink(false), 180);
+        if (clipboardPrompt != null) clipboardPrompt.resume();
         if (mediaOpened && hasMediaPermission()) loadPhoneMedia();
+    }
+
+    @Override protected void onPause() {
+        if (clipboardPrompt != null) clipboardPrompt.pause();
+        super.onPause();
+    }
+
+    @Override public void onWindowFocusChanged(boolean hasFocus) {
+        super.onWindowFocusChanged(hasFocus);
+        if (hasFocus && clipboardPrompt != null) {
+            urlInput.postDelayed(() -> clipboardPrompt.checkNow(), 180);
+        }
     }
 
     @Override protected void onStop() {
@@ -173,6 +204,7 @@ public class MainActivity extends Activity {
     }
 
     @Override protected void onDestroy() {
+        if (clipboardPrompt != null) clipboardPrompt.destroy();
         executor.shutdown();
         super.onDestroy();
     }
@@ -194,6 +226,7 @@ public class MainActivity extends Activity {
             urlInput.setText(link);
             lastSeenClipboard = link;
             if (clipboardLabel != null) clipboardLabel.setText("✓ تم استقبال الرابط من المشاركة");
+            if (clipboardPrompt != null) clipboardPrompt.offerFromShare(link);
         }
     }
 
