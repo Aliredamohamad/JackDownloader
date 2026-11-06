@@ -48,6 +48,7 @@ jobs:
           test -s "$SRC/java/com/jack/downloader/DownloadService.java"
           test -s "$SRC/java/com/jack/downloader/MainActivity.java"
           grep -q "catch (Throwable updateError)" "$SRC/java/com/jack/downloader/MainActivity.java"
+          grep -q "The service already owns the initialized engine" "$SRC/java/com/jack/downloader/MainActivity.java"
           grep 'versionName' "$APP/app/build.gradle"
 
       - name: Install Java 17
