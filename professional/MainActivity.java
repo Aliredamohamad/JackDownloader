@@ -153,8 +153,16 @@ public class MainActivity extends Activity {
     }
 
     private void initializeAndRefreshEngine(boolean manual) {
-        if (DownloadService.running || analyzing) {
-            toast("انتظر اكتمال التنزيل قبل تحديث المحرك");
+        if (DownloadService.running) {
+            if (manual) toast("انتظر اكتمال التنزيل قبل تحديث المحرك");
+            // The service already owns the initialized engine; keep the new
+            // Activity ready for the next download after the service finishes.
+            ready = true;
+            updateActions();
+            return;
+        }
+        if (analyzing) {
+            toast("انتظر اكتمال تحليل الرابط");
             return;
         }
         ready = false;
