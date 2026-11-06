@@ -189,10 +189,10 @@ public class DownloadService extends Service {
 
     private void runDownload(String url, String extension, int maxHeight) {
         File staging = null;
-        String processId = "jack_" + UUID.randomUUID().toString();
-        currentProcess = processId;
+        String jobId = "jack_" + UUID.randomUUID().toString();
         boolean succeeded = false;
-        boolean wasCancelled = false;
+        String lastFailure = "لم ينجح التنزيل من المصدر المحدد";
+        int attempts = isAudio(extension) ? 2 : 3;
         try {
             YoutubeDL.getInstance().init(getApplicationContext());
             FFmpeg.getInstance().init(getApplicationContext());
@@ -200,88 +200,227 @@ public class DownloadService extends Service {
 
             File parent = getExternalFilesDir(Environment.DIRECTORY_DOWNLOADS);
             if (parent == null) parent = getFilesDir();
-            staging = new File(parent, processId);
+            staging = new File(parent, jobId);
             if (!staging.mkdirs() && !staging.isDirectory())
-                throw new IOException("تعذر إنشاء مجلد العمل");
+                throw new IOException("تعذّر إنشاء مجلد التنزيل المؤقت");
 
-            YoutubeDLRequest request = new YoutubeDLRequest(url);
-            request.addOption("--no-playlist");
-            request.addOption("--no-mtime");
-            request.addOption("--no-overwrites");
-            request.addOption("-o", new File(staging, "%(title).100B [%(id)s].%(ext)s").getAbsolutePath());
+            for (int attempt = 0; attempt < attempts && !cancelled.get(); attempt++) {
+                File attemptDir = new File(staging, "attempt-" + (attempt + 1));
+                if (!attemptDir.mkdirs() && !attemptDir.isDirectory())
+                    throw new IOException("تعذّر تجهيز مساحة التنزيل");
 
-            if (isAudio(extension)) {
-                request.addOption("-f", "bestaudio/best");
-                request.addOption("--extract-audio");
-                request.addOption("--audio-format", extension);
-                request.addOption("--audio-quality", "0");
-            } else {
-                String limit = maxHeight <= 0 ? "" : "[height<=" + maxHeight + "]";
-                if ("auto".equals(extension)) {
-                    // Prefer a widely supported MP4/AVC/AAC stream up to 1080p,
-                    // but fall back to other available combinations if necessary.
-                    request.addOption("-f",
-                            "bv*" + limit + "[vcodec^=avc1]+ba[acodec^=mp4a]/"
-                            + "b" + limit + "[ext=mp4]/"
-                            + "bv*" + limit + "+ba/b" + limit + "/best");
-                    request.addOption("--merge-output-format", "mp4");
-                    request.addOption("--recode-video", "mp4");
-                } else {
-                    String selection = maxHeight <= 0 ? "bv*+ba/b"
-                            : "bv*" + limit + "+ba/b" + limit;
-                    request.addOption("-f", selection);
-                    request.addOption("--merge-output-format", extension);
-                    request.addOption("--recode-video", extension);
+                String processId = jobId + "_" + (attempt + 1);
+                currentProcess = processId;
+                progress = 0;
+                try {
+                    YoutubeDLRequest request = makeRequest(
+                            url, extension, maxHeight, attemptDir, attempt);
+                    showProgress(attempt == 0
+                            ? "جارٍ تنزيل الفيديو أو الصوت..."
+                            : "جارٍ تجربة طريقة تنزيل بديلة (" + (attempt + 1) + "/" + attempts + ")...", 0);
+
+                    YoutubeDL.getInstance().execute(request, processId, (percent, etaSeconds, line) -> {
+                        if (cancelled.get()) return Unit.INSTANCE;
+                        int pct = Math.max(0, Math.min(100, Math.round(percent)));
+                        long eta = Math.max(0L, etaSeconds);
+                        showProgress(String.format(Locale.ROOT,
+                                "جارٍ التنزيل %d%% • متبقٍ نحو %d ثانية", pct, eta), pct);
+                        return Unit.INSTANCE;
+                    });
+
+                    if (cancelled.get()) return;
+
+                    File[] downloaded = attemptDir.listFiles((folder, name) -> {
+                        String n = name.toLowerCase(Locale.ROOT);
+                        return !n.endsWith(".part") && !n.endsWith(".ytdl")
+                                && !n.endsWith(".temp") && !n.endsWith(".json")
+                                && !n.endsWith(".jpg") && !n.endsWith(".jpeg")
+                                && !n.endsWith(".png") && !n.endsWith(".webp");
+                    });
+                    if (downloaded == null || downloaded.length == 0)
+                        throw new IOException("لم ينتج ملف مكتمل من رابط الفيديو");
+
+                    showProgress("اكتمل الاستلام • جارٍ حفظ الملف في الهاتف...", 99);
+                    int saved = 0;
+                    for (File file : downloaded) {
+                        if (cancelled.get()) return;
+                        if (file.isFile() && file.length() > 0) {
+                            savePublicDownload(file);
+                            saved++;
+                        }
+                    }
+                    if (saved == 0) throw new IOException("لم يعثر على ملف نهائي صالح");
+                    succeeded = true;
+                    progress = 100;
+                    getSharedPreferences("download_state", MODE_PRIVATE)
+                            .edit().remove("last_error").apply();
+                    String result = attempt > 0
+                            ? "✓ اكتمل التنزيل بطريقة بديلة • تحقّق من صيغة الملف المحفوظ"
+                            : "✓ اكتمل التنزيل • محفوظ في Download/Jack Downloader";
+                    updateState(result, 100, false);
+                    break;
+                } catch (Exception problem) {
+                    if (cancelled.get()) return;
+                    lastFailure = friendlyFailure(problem);
+                    if (attempt + 1 < attempts && canFallback(problem)) {
+                        showProgress("تعذّرت الطريقة الحالية؛ أجرّب صيغة تنزيل أبسط...", 0);
+                    } else {
+                        break;
+                    }
+                } finally {
+                    currentProcess = null;
+                    deleteTree(attemptDir);
                 }
             }
-
-            showProgress("جارٍ تنزيل الملف...", 0);
-            YoutubeDL.getInstance().execute(request, processId, (percent, etaSeconds, line) -> {
-                if (cancelled.get()) return Unit.INSTANCE;
-                int pct = Math.max(0, Math.min(100, Math.round(percent)));
-                showProgress(String.format(Locale.ROOT, "جارٍ التنزيل %d%% • متبقٍ نحو %d ثانية",
-                        pct, Math.max(0, etaSeconds)), pct);
-                return Unit.INSTANCE;
-            });
-
-            if (cancelled.get()) return;
-            File[] completed = staging.listFiles((folder, name) -> !name.endsWith(".part")
-                    && !name.endsWith(".ytdl") && !name.endsWith(".temp"));
-            if (completed == null || completed.length == 0)
-                throw new IOException("لم ينتج عن الرابط ملف قابل للحفظ");
-
-            showProgress("اكتمل الجلب • جارٍ حفظ الوسائط...", 99);
-            int count = 0;
-            for (File source : completed) {
-                if (cancelled.get()) return;
-                if (source.isFile() && source.length() > 0) {
-                    savePublicDownload(source);
-                    count++;
-                }
-            }
-            if (count == 0) throw new IOException("لا يوجد ملف نهائي صالح");
-            succeeded = true;
-            progress = 100;
-            updateState("✓ اكتمل التنزيل • محفوظ في Download/Jack Downloader", 100, false);
+            if (!succeeded && !cancelled.get())
+                throw new IOException(lastFailure);
         } catch (Exception ex) {
             if (!cancelled.get()) {
-                updateState("فشل التنزيل: " + message(ex), progress, false);
+                String error = friendlyFailure(ex);
+                getSharedPreferences("download_state", MODE_PRIVATE)
+                        .edit().putString("last_error", error).apply();
+                updateState("فشل التنزيل: " + error, progress, false);
             }
         } finally {
-            wasCancelled = cancelled.get();
             if (staging != null) deleteTree(staging);
             currentProcess = null;
+            boolean wasCancelled = cancelled.get();
             running = false;
             if (wasCancelled) updateState("تم إلغاء التنزيل", 0, false);
             try { stopForeground(STOP_FOREGROUND_REMOVE); }
             catch (Exception ignored) { }
             if (succeeded) {
-                notifyResult("اكتمل التنزيل ✓", "تم حفظ الملف في مجلد Jack Downloader", true);
+                notifyResult("اكتمل التنزيل ✓", "افتح Download/Jack Downloader", true);
             } else if (!wasCancelled) {
-                notifyResult("فشل التنزيل", "افتح Jack Downloader للاطلاع على السبب", false);
+                notifyResult("لم يكتمل التنزيل", "افتح التطبيق لمعرفة السبب المحدّد", false);
             }
             stopSelf();
         }
+    }
+
+    private YoutubeDLRequest makeRequest(String url, String extension,
+            int maxHeight, File folder, int attempt) {
+        YoutubeDLRequest request = new YoutubeDLRequest(url);
+        request.addOption("--no-playlist");
+        request.addOption("--no-mtime");
+        request.addOption("--no-overwrites");
+        request.addOption("--retries", 6);
+        request.addOption("--fragment-retries", 6);
+        request.addOption("--extractor-retries", 3);
+        request.addOption("--socket-timeout", 25);
+        request.addOption("-o",
+                new File(folder, "%(title).100B [%(id)s].%(ext)s").getAbsolutePath());
+
+        if (isAudio(extension)) {
+            if (attempt == 0) {
+                request.addOption("-f", "bestaudio/best");
+                request.addOption("--extract-audio");
+                request.addOption("--audio-format", extension);
+                request.addOption("--audio-quality", "2");
+            } else {
+                // FFmpeg can fail on certain devices; preserve a playable audio
+                // file rather than reject the download solely over conversion.
+                request.addOption("-f", "bestaudio[ext=m4a]/bestaudio/best");
+            }
+            return request;
+        }
+
+        String bound = maxHeight > 0 ? "[height<=" + maxHeight + "]" : "";
+        if ("auto".equals(extension)) {
+            if (attempt == 0) {
+                // MP4 video+M4A audio if available. No forced re-encoding.
+                request.addOption("-f", "bv" + bound + "[ext=mp4]+ba[ext=m4a]/"
+                        + "b" + bound + "[ext=mp4]/b" + bound + "/best");
+                request.addOption("--merge-output-format", "mp4");
+            } else if (attempt == 1) {
+                // Many social sites expose a complete video+audio file,
+                // which avoids the FFmpeg post-processing step entirely.
+                request.addOption("-f", "b" + bound + "[ext=mp4]/b" + bound + "/best");
+            } else {
+                request.addOption("-f", "bv" + bound + "+ba/b" + bound + "/best");
+            }
+            return request;
+        }
+
+        if (attempt == 0) {
+            if ("mp4".equals(extension)) {
+                request.addOption("-f", "bv" + bound + "[ext=mp4]+ba[ext=m4a]/"
+                        + "b" + bound + "[ext=mp4]/best[ext=mp4]");
+                request.addOption("--merge-output-format", "mp4");
+            } else {
+                request.addOption("-f", "bv" + bound + "+ba/b" + bound + "/best");
+                request.addOption("--merge-output-format", extension);
+                request.addOption("--remux-video", extension);
+            }
+        } else if (attempt == 1) {
+            request.addOption("-f", "b" + bound + "/best");
+        } else {
+            request.addOption("-f", "bv" + bound + "+ba/b" + bound + "/best");
+        }
+        return request;
+    }
+
+    private static boolean canFallback(Exception error) {
+        if (error instanceof InterruptedException) return false;
+        String m = String.valueOf(error.getMessage()).toLowerCase(Locale.ROOT);
+        return !m.contains("login required")
+                && !m.contains("sign in")
+                && !m.contains("private video")
+                && !m.contains("http error 403")
+                && !m.contains("http error 429")
+                && !m.contains("drm")
+                && !m.contains("unsupported url")
+                && !m.contains("permission denied")
+                && !m.contains("no space left")
+                && !m.contains("تعذّر حفظ");
+    }
+
+    private static String friendlyFailure(Exception exception) {
+        String raw = exception.getMessage();
+        if (TextUtils.isEmpty(raw)) raw = exception.getClass().getSimpleName();
+        String lower = raw.toLowerCase(Locale.ROOT);
+        if (lower.contains("login required") || lower.contains("sign in")
+                || lower.contains("authentication") || lower.contains("private video")
+                || lower.contains("cookies")) {
+            return "الموقع يطلب تسجيل الدخول أو أن الفيديو خاص. حاول رابطاً عاماً متاحاً.";
+        }
+        if (lower.contains("drm") || lower.contains("protected content")) {
+            return "المحتوى محمي بنظام DRM ولا يمكن تنزيله بهذه الطريقة.";
+        }
+        if (lower.contains("403") || lower.contains("forbidden")) {
+            return "رفض الموقع الوصول (403). قد يكون الرابط مقيداً أو يتطلب صلاحية.";
+        }
+        if (lower.contains("429") || lower.contains("too many requests")) {
+            return "الموقع يقيّد كثرة الطلبات (429). جرّب لاحقاً.";
+        }
+        if (lower.contains("unsupported url") || lower.contains("unsupported site")) {
+            return "هذا الرابط غير مدعوم حالياً. جرّب رابط المنشور الأصلي.";
+        }
+        if (lower.contains("requested format is not available")
+                || lower.contains("no video formats")) {
+            return "الجودة أو الصيغة غير متاحة لهذا الرابط. اختر «تلقائي» أو جودة أقل.";
+        }
+        if (lower.contains("ffmpeg") || lower.contains("postprocess")) {
+            return "تعذّر دمج أو تحويل المقطع. جرّب الصيغة التلقائية أو M4A للصوت.";
+        }
+        if (lower.contains("no space left") || lower.contains("enospc")
+                || lower.contains("مساحة") || lower.contains("تعذّر حفظ")) {
+            return "مساحة الهاتف غير كافية أو تعذر الحفظ. حرّر مساحة وأعد المحاولة.";
+        }
+        if (lower.contains("timed out") || lower.contains("timeout")
+                || lower.contains("connection reset") || lower.contains("network is unreachable")) {
+            return "انقطع الاتصال أو انتهت المهلة. افحص الإنترنت وأعد المحاولة.";
+        }
+        if (lower.contains("http error 404")) return "لم يعد الفيديو متاحاً على الرابط (404).";
+        String technical = raw;
+        int idx = Math.max(technical.lastIndexOf("ERROR:"), technical.lastIndexOf("Error:"));
+        if (idx >= 0) technical = technical.substring(idx);
+        technical = technical.split("\\r?\\n")[0].trim();
+        technical = technical.replaceAll("https?://\\S+", "[رابط مخفي]");
+        technical = technical.replaceAll("\\s+", " ");
+        if (technical.length() > 250) technical = technical.substring(0, 250);
+        if (TextUtils.isEmpty(technical)) technical = "خطأ غير معروف";
+        return technical + " • جرّب وضع «تلقائي» أو رابطاً عاماً آخر.";
     }
 
     private void savePublicDownload(File source) throws IOException {
