@@ -27,6 +27,8 @@ jobs:
           unzip -q JackDownloaderAndroid_Source.zip
           test -f JackDownloaderAndroid/app/build.gradle
           test -f JackDownloaderAndroid/settings.gradle
+          # Fix FFmpeg import in the original source archive.
+          sed -i 's/com.yausername.youtubedl_android.FFmpeg/com.yausername.ffmpeg.FFmpeg/g' JackDownloaderAndroid/app/src/main/java/com/jack/downloader/MainActivity.java
 
       - name: Install JDK 17
         uses: actions/setup-java@v4
