@@ -9,7 +9,7 @@ on:
       - 'JackDownloaderAndroid_Source.zip'
 
 permissions:
-  contents: read
+  contents: write
 
 jobs:
   build:
@@ -56,3 +56,19 @@ jobs:
           path: JackDownloaderAndroid/app/build/outputs/apk/debug/app-debug.apk
           if-no-files-found: error
           retention-days: 14
+
+      - name: Publish directly downloadable APK
+        shell: bash
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          set -euo pipefail
+          APK="JackDownloaderAndroid/app/build/outputs/apk/debug/app-debug.apk"
+          test -s "$APK"
+          if gh release view v1.0.0 >/dev/null 2>&1; then
+            gh release upload v1.0.0 "$APK#JackDownloader.apk" --clobber
+          else
+            gh release create v1.0.0 "$APK#JackDownloader.apk" \
+              --title "Jack Downloader v1.0.0" \
+              --notes "Download JackDownloader.apk directly from Assets. Android 8.0+. Debug build; support varies by website."
+          fi
