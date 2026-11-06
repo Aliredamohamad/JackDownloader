@@ -10,6 +10,12 @@ import android.content.Intent;
 import android.content.IntentFilter;
 import android.content.pm.PackageManager;
 import android.database.Cursor;
+import android.provider.OpenableColumns;
+import android.text.Editable;
+import android.text.TextWatcher;
+import android.content.res.ColorStateList;
+import android.graphics.drawable.RippleDrawable;
+import android.graphics.drawable.ColorDrawable;
 import android.graphics.Color;
 import android.graphics.Typeface;
 import android.graphics.drawable.GradientDrawable;
@@ -78,6 +84,10 @@ public class MainActivity extends Activity {
     private TextView clipboardLabel;
     private TextView mediaSummary;
     private LinearLayout mediaRows;
+    private EditText mediaSearch;
+    private final ArrayList<PhoneMedia> cachedMedia = new ArrayList<>();
+    private final ArrayList<PhoneMedia> displayedMedia = new ArrayList<>();
+    private String mediaFilter = "all";
     private boolean mediaOpened;
     private String lastSeenClipboard = "";
 
@@ -114,6 +124,8 @@ public class MainActivity extends Activity {
         cancelButton.setOnClickListener(v -> cancelDownload());
         findViewById(R.id.btnOpenDownloads).setOnClickListener(v -> showPhoneMedia());
         addProfessionalPanels();
+        TouchEffects.installRecursively(findViewById(R.id.scrollRoot));
+        animateFirstAppearance();
         handleIncomingIntent(getIntent());
 
         executor.execute(() -> {
@@ -364,13 +376,84 @@ public class MainActivity extends Activity {
         mediaSummary.setPadding(0, dp(8), 0, dp(5));
         card.addView(mediaSummary);
 
+        mediaSearch = new EditText(this);
+        mediaSearch.setSingleLine(true);
+        mediaSearch.setHint("ابحث عن اسم فيديو أو مقطع صوتي...");
+        mediaSearch.setTextColor(Color.WHITE);
+        mediaSearch.setTextColorHint(Color.rgb(144, 164, 189));
+        mediaSearch.setTextSize(14);
+        mediaSearch.setPadding(dp(13), dp(7), dp(13), dp(7));
+        mediaSearch.setBackground(roundInput());
+        LinearLayout.LayoutParams searchLayout = new LinearLayout.LayoutParams(-1, dp(47));
+        searchLayout.setMargins(0, dp(12), 0, dp(10));
+        card.addView(mediaSearch, searchLayout);
+        mediaSearch.addTextChangedListener(new TextWatcher() {
+            @Override public void beforeTextChanged(CharSequence s, int start, int count, int after) { }
+            @Override public void onTextChanged(CharSequence s, int start, int before, int count) {
+                renderMedia();
+            }
+            @Override public void afterTextChanged(Editable editable) { }
+        });
+
+        LinearLayout filters = new LinearLayout(this);
+        filters.setOrientation(LinearLayout.HORIZONTAL);
+        addFilterButton(filters, "الكل", "all");
+        addFilterButton(filters, "الفيديو", "video");
+        addFilterButton(filters, "الصوتيات", "audio");
+        card.addView(filters);
+
         mediaRows = new LinearLayout(this);
         mediaRows.setOrientation(LinearLayout.VERTICAL);
         card.addView(mediaRows);
         root.addView(card, root.getChildCount() - 1);
+        card.setAlpha(0f);
+        card.setTranslationY(dp(18));
+        card.animate().alpha(1f).translationY(0).setDuration(420).start();
+    }
+
+    private void animateFirstAppearance() {
+        ScrollView scroll = findViewById(R.id.scrollRoot);
+        View root = scroll.getChildAt(0);
+        root.setAlpha(0.72f);
+        root.animate().alpha(1f).setDuration(360).start();
     }
 
     private int dp(int value) { return Math.round(value * getResources().getDisplayMetrics().density); }
+
+    private GradientDrawable roundInput() {
+        GradientDrawable bg = new GradientDrawable();
+        bg.setColor(Color.rgb(13, 27, 45));
+        bg.setCornerRadius(dp(12));
+        bg.setStroke(dp(1), Color.rgb(51, 84, 110));
+        return bg;
+    }
+
+    private void addFilterButton(LinearLayout parent, String text, String filter) {
+        Button button = new Button(this);
+        button.setAllCaps(false);
+        button.setText(text);
+        button.setTextColor(Color.WHITE);
+        button.setTextSize(12);
+        button.setBackground(roundInput());
+        LinearLayout.LayoutParams params = new LinearLayout.LayoutParams(0, dp(47), 1);
+        params.setMargins(dp(2), 0, dp(2), 0);
+        parent.addView(button, params);
+        button.setOnClickListener(v -> {
+            mediaFilter = filter;
+            for (int i = 0; i < parent.getChildCount(); i++) {
+                Button b = (Button) parent.getChildAt(i);
+                boolean active = b == button;
+                b.setTextColor(active ? Color.rgb(105, 226, 202) : Color.WHITE);
+                b.setTypeface(null, active ? Typeface.BOLD : Typeface.NORMAL);
+            }
+            renderMedia();
+        });
+        if ("all".equals(filter)) {
+            button.setTextColor(Color.rgb(105, 226, 202));
+            button.setTypeface(null, Typeface.BOLD);
+        }
+        TouchEffects.apply(button);
+    }
 
     private boolean hasMediaPermission() {
         if (Build.VERSION.SDK_INT >= 33) {
@@ -408,14 +491,37 @@ public class MainActivity extends Activity {
             queryMedia(MediaStore.Audio.Media.EXTERNAL_CONTENT_URI, false, files);
             files.sort((a, b) -> Long.compare(b.date, a.date));
             runOnUiThread(() -> {
-                mediaSummary.setText("وسائط متاحة: " + files.size() + " • تعرض أحدث 60 ملفاً");
-                mediaRows.removeAllViews();
-                if (files.isEmpty()) {
-                    mediaSummary.setText("لا توجد ملفات متاحة، أو أن إذن الوصول جزئي. جرّب «اختيار ملف».");
-                }
-                for (int i = 0; i < Math.min(60, files.size()); i++) addMediaRow(files.get(i));
+                cachedMedia.clear();
+                cachedMedia.addAll(files);
+                renderMedia();
             });
         });
+    }
+
+    private void renderMedia() {
+        if (mediaRows == null || mediaSummary == null) return;
+        mediaRows.removeAllViews();
+        displayedMedia.clear();
+        String term = mediaSearch == null ? "" :
+                mediaSearch.getText().toString().trim().toLowerCase(Locale.ROOT);
+        for (PhoneMedia file : cachedMedia) {
+            if ("video".equals(mediaFilter) && !file.video) continue;
+            if ("audio".equals(mediaFilter) && file.video) continue;
+            if (!term.isEmpty() && !file.name.toLowerCase(Locale.ROOT).contains(term)) continue;
+            displayedMedia.add(file);
+        }
+        mediaSummary.setText("تم العثور على " + displayedMedia.size()
+                + " ملف • اضغط على ملف لتشغيله داخل التطبيق");
+        if (displayedMedia.isEmpty()) {
+            TextView empty = new TextView(this);
+            empty.setText("لا توجد ملفات ضمن البحث الحالي • أو اختر ملفاً يدوياً");
+            empty.setTextColor(Color.rgb(161,179,203));
+            empty.setPadding(dp(5), dp(18), dp(5), dp(14));
+            mediaRows.addView(empty);
+        }
+        for (int i = 0; i < Math.min(75, displayedMedia.size()); i++) {
+            addMediaRow(displayedMedia.get(i));
+        }
     }
 
     private void queryMedia(Uri collection, boolean video, List<PhoneMedia> files) {
@@ -465,10 +571,14 @@ public class MainActivity extends Activity {
         title.setMaxLines(3);
         row.addView(title, new LinearLayout.LayoutParams(0, -2, 1));
         Button open = new Button(this);
-        open.setText("فتح");
+        open.setText("تشغيل ▶");
         open.setAllCaps(false);
         open.setOnClickListener(v -> openMedia(file.uri, file.video ? "video/*" : "audio/*"));
-        row.addView(open, new LinearLayout.LayoutParams(dp(80), dp(48)));
+        TouchEffects.apply(open);
+        row.addView(open, new LinearLayout.LayoutParams(dp(93), dp(48)));
+        row.setBackground(new RippleDrawable(ColorStateList.valueOf(Color.argb(85,105,226,202)),
+                new ColorDrawable(Color.TRANSPARENT), null));
+        row.setOnClickListener(v -> openMedia(file.uri, file.video ? "video/*" : "audio/*"));
         mediaRows.addView(row);
         View separator = new View(this);
         separator.setBackgroundColor(Color.rgb(49, 68, 93));
@@ -477,13 +587,49 @@ public class MainActivity extends Activity {
 
     private void openMedia(Uri uri, String mimeType) {
         try {
-            Intent view = new Intent(Intent.ACTION_VIEW);
-            view.setDataAndType(uri, mimeType);
-            view.addFlags(Intent.FLAG_GRANT_READ_URI_PERMISSION);
-            startActivity(Intent.createChooser(view, "فتح بواسطة"));
+            Intent player = new Intent(this, PlayerActivity.class);
+            player.putExtra(PlayerActivity.EXTRA_URI, uri.toString());
+            boolean isVideo = mimeType != null && mimeType.startsWith("video/");
+            player.putExtra(PlayerActivity.EXTRA_VIDEO, isVideo);
+            player.putExtra(PlayerActivity.EXTRA_NAME, resolveMediaName(uri));
+            player.addFlags(Intent.FLAG_GRANT_READ_URI_PERMISSION);
+
+            int selected = -1;
+            ArrayList<String> uris = new ArrayList<>();
+            ArrayList<String> names = new ArrayList<>();
+            ArrayList<String> kinds = new ArrayList<>();
+            for (int i = 0; i < Math.min(75, displayedMedia.size()); i++) {
+                PhoneMedia item = displayedMedia.get(i);
+                if (uri.equals(item.uri)) selected = i;
+                uris.add(item.uri.toString());
+                names.add(item.name);
+                kinds.add(item.video ? "video" : "audio");
+            }
+            if (selected >= 0) {
+                player.putStringArrayListExtra(PlayerActivity.EXTRA_URIS, uris);
+                player.putStringArrayListExtra(PlayerActivity.EXTRA_NAMES, names);
+                player.putStringArrayListExtra(PlayerActivity.EXTRA_KINDS, kinds);
+                player.putExtra(PlayerActivity.EXTRA_INDEX, selected);
+            }
+            startActivity(player);
+            overridePendingTransition(android.R.anim.fade_in, android.R.anim.fade_out);
         } catch (Exception e) {
-            toast("لا يتوفر تطبيق لفتح هذا الملف");
+            toast("تعذر فتح المشغّل: " + message(e));
         }
+    }
+
+    private String resolveMediaName(Uri uri) {
+        for (PhoneMedia item : displayedMedia) {
+            if (uri.equals(item.uri)) return item.name;
+        }
+        try (Cursor cursor = getContentResolver().query(
+                uri, new String[]{OpenableColumns.DISPLAY_NAME}, null, null, null)) {
+            if (cursor != null && cursor.moveToFirst()) {
+                int column = cursor.getColumnIndex(OpenableColumns.DISPLAY_NAME);
+                if (column >= 0) return cursor.getString(column);
+            }
+        } catch (Exception ignored) { }
+        return "ملف الوسائط";
     }
 
     private void pickMedia() {
@@ -499,8 +645,12 @@ public class MainActivity extends Activity {
     @Override protected void onActivityResult(int requestCode, int resultCode, Intent data) {
         super.onActivityResult(requestCode, resultCode, data);
         if (requestCode == REQ_PICK && resultCode == RESULT_OK && data != null && data.getData() != null) {
-            openMedia(data.getData(), getContentResolver().getType(data.getData()) == null ?
-                    "*/*" : getContentResolver().getType(data.getData()));
+            String mime = getContentResolver().getType(data.getData());
+            String mediaName = resolveMediaName(data.getData()).toLowerCase(Locale.ROOT);
+            if (mime == null) {
+                mime = mediaName.matches(".*\\.(mp4|mkv|webm|mov|avi|3gp)$") ? "video/*" : "audio/*";
+            }
+            openMedia(data.getData(), mime);
         }
     }
 
