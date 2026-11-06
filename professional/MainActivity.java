@@ -348,12 +348,12 @@ public class MainActivity extends Activity {
         actions.setOrientation(LinearLayout.HORIZONTAL);
         Button show = new Button(this);
         show.setText("عرض وسائط الهاتف");
-        show.setTextAllCaps(false);
+        show.setAllCaps(false);
         show.setOnClickListener(v -> showPhoneMedia());
         actions.addView(show, new LinearLayout.LayoutParams(0, dp(52), 1));
         Button pick = new Button(this);
         pick.setText("اختيار ملف");
-        pick.setTextAllCaps(false);
+        pick.setAllCaps(false);
         pick.setOnClickListener(v -> pickMedia());
         actions.addView(pick, new LinearLayout.LayoutParams(0, dp(52), 1));
         card.addView(actions);
@@ -466,7 +466,7 @@ public class MainActivity extends Activity {
         row.addView(title, new LinearLayout.LayoutParams(0, -2, 1));
         Button open = new Button(this);
         open.setText("فتح");
-        open.setTextAllCaps(false);
+        open.setAllCaps(false);
         open.setOnClickListener(v -> openMedia(file.uri, file.video ? "video/*" : "audio/*"));
         row.addView(open, new LinearLayout.LayoutParams(dp(80), dp(48)));
         mediaRows.addView(row);
