@@ -380,7 +380,7 @@ public class MainActivity extends Activity {
         mediaSearch.setSingleLine(true);
         mediaSearch.setHint("ابحث عن اسم فيديو أو مقطع صوتي...");
         mediaSearch.setTextColor(Color.WHITE);
-        mediaSearch.setTextColorHint(Color.rgb(144, 164, 189));
+        mediaSearch.setHintTextColor(Color.rgb(144, 164, 189));
         mediaSearch.setTextSize(14);
         mediaSearch.setPadding(dp(13), dp(7), dp(13), dp(7));
         mediaSearch.setBackground(roundInput());
