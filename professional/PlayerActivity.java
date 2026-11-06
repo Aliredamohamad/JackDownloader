@@ -11,9 +11,12 @@ import android.graphics.Color;
 import android.graphics.Typeface;
 import android.graphics.drawable.GradientDrawable;
 import android.graphics.drawable.RippleDrawable;
-import android.media.AudioAttributes;
-import android.media.MediaPlayer;
-import android.media.PlaybackParams;
+import androidx.media3.common.MediaItem;
+import androidx.media3.common.PlaybackException;
+import androidx.media3.common.Player;
+import androidx.media3.common.VideoSize;
+import androidx.media3.exoplayer.ExoPlayer;
+import androidx.media3.ui.PlayerView;
 import android.net.Uri;
 import android.os.Build;
 import android.os.Bundle;
@@ -30,7 +33,6 @@ import android.widget.LinearLayout;
 import android.widget.ScrollView;
 import android.widget.SeekBar;
 import android.widget.TextView;
-import android.widget.VideoView;
 import android.widget.Toast;
 
 import java.util.ArrayList;
@@ -58,9 +60,9 @@ public class PlayerActivity extends Activity {
     private boolean fullScreen = false;
     private boolean dragging = false;
     private boolean videoMode = true;
-    private MediaPlayer audio;
-    private MediaPlayer videoEngine;
-    private VideoView videoView;
+    private ExoPlayer player;
+    private PlayerView videoView;
+    private boolean firstVideoFrameRendered;
     private FrameLayout stage;
     private TextView audioArt;
     private TextView fileName;
@@ -151,13 +153,56 @@ public class PlayerActivity extends Activity {
 
         stage = new FrameLayout(this);
         stage.setBackground(round(rgb("#0C1930"), 20, rgb("#36516C")));
-        stage.setClipToOutline(true);
+        // Avoid clipping the video rendering surface on devices with SurfaceView issues.
+        stage.setClipToOutline(false);
         LinearLayout.LayoutParams stageParams = new LinearLayout.LayoutParams(-1, dp(232));
         root.addView(stage, stageParams);
 
-        videoView = new VideoView(this);
-        videoView.setBackgroundColor(Color.BLACK);
-        videoView.setKeepScreenOn(true);
+        // Texture-backed Media3 PlayerView prevents SurfaceView stacking/black-screen
+        // issues seen when VideoView is embedded in scrolling or rounded layouts.
+        player = new ExoPlayer.Builder(this).build();
+        player.addListener(new Player.Listener() {
+            @Override public void onPlaybackStateChanged(int state) {
+                if (state == Player.STATE_READY) {
+                    prepared = true;
+                    if (videoMode) {
+                        playbackStatus.setText(firstVideoFrameRendered
+                                ? "جاهز • تشغيل الفيديو بالصورة والصوت"
+                                : "جارٍ تجهيز صورة الفيديو...");
+                    } else {
+                        playbackStatus.setText("جاهز • تشغيل الصوت");
+                    }
+                    refreshProgress();
+                } else if (state == Player.STATE_BUFFERING) {
+                    if (playbackStatus != null) playbackStatus.setText("جارٍ تجهيز المقطع...");
+                } else if (state == Player.STATE_ENDED) {
+                    onComplete();
+                }
+            }
+            @Override public void onRenderedFirstFrame() {
+                firstVideoFrameRendered = true;
+                if (videoMode && playbackStatus != null)
+                    playbackStatus.setText("تشغيل الفيديو • الصورة تعمل ✓");
+            }
+            @Override public void onVideoSizeChanged(VideoSize size) {
+                if (videoMode && size.width > 0 && size.height > 0 && fileInfo != null) {
+                    fileInfo.setText("🎬 فيديو " + size.width + "×" + size.height
+                            + "  •  " + (index + 1) + " / " + uris.size());
+                }
+            }
+            @Override public void onPlayerError(PlaybackException error) {
+                String problem = error.getErrorCodeName();
+                if (videoMode) {
+                    error("تعذّر تشغيل صورة الفيديو (" + problem
+                            + "). جرّب تحميله بصيغة MP4 وجودة 720p.");
+                } else {
+                    error("تعذّر تشغيل الصوت: " + problem);
+                }
+            }
+        });
+        videoView = (PlayerView) getLayoutInflater().inflate(
+                R.layout.texture_player, stage, false);
+        videoView.setPlayer(player);
         stage.addView(videoView, new FrameLayout.LayoutParams(-1, -1));
 
         audioArt = new TextView(this);
@@ -269,6 +314,8 @@ public class PlayerActivity extends Activity {
         repeatButton.setOnClickListener(v -> {
             repeat = !repeat;
             repeatButton.setText(repeat ? "تكرار: نعم" : "تكرار: لا");
+            if (player != null) player.setRepeatMode(repeat
+                    ? Player.REPEAT_MODE_ONE : Player.REPEAT_MODE_OFF);
         });
         options.addView(repeatButton, weighted());
 
@@ -298,13 +345,8 @@ public class PlayerActivity extends Activity {
 
     private void playIndex(int selected) {
         if (uris.isEmpty() || selected < 0 || selected >= uris.size()) return;
-        if (audio != null) {
-            try { audio.reset(); audio.release(); } catch (Exception ignored) { }
-            audio = null;
-        }
-        if (videoView != null) videoView.stopPlayback();
-        videoEngine = null;
         prepared = false;
+        firstVideoFrameRendered = false;
         index = selected;
         speedIndex = 1;
         speedButton.setText("السرعة 1×");
@@ -333,47 +375,24 @@ public class PlayerActivity extends Activity {
                 ? View.VISIBLE : View.GONE);
 
         try {
+            player.stop();
+            player.clearMediaItems();
+            player.setPlaybackSpeed(1.0f);
+            player.setRepeatMode(repeat ? Player.REPEAT_MODE_ONE : Player.REPEAT_MODE_OFF);
+            player.setMediaItem(MediaItem.fromUri(uri));
+            player.prepare();
+            player.play();
             if (videoMode) {
-                videoView.setOnPreparedListener(mp -> {
-                    videoEngine = mp;
-                    prepared = true;
-                    videoEngine.setLooping(repeat);
-                    videoView.start();
-                    playbackStatus.setText("جاهز • تشغيل الفيديو");
-                    refreshProgress();
-                });
-                videoView.setOnCompletionListener(mp -> onComplete());
-                videoView.setOnErrorListener((mp, what, extra) -> {
-                    error("تعذر تشغيل الفيديو أو أن صيغته غير مدعومة");
-                    return true;
-                });
-                videoView.setVideoURI(uri);
-                videoView.requestFocus();
-            } else {
-                MediaPlayer engine = new MediaPlayer();
-                audio = engine;
-                engine.setAudioAttributes(new AudioAttributes.Builder()
-                        .setUsage(AudioAttributes.USAGE_MEDIA)
-                        .setContentType(AudioAttributes.CONTENT_TYPE_MUSIC)
-                        .build());
-                engine.setDataSource(this, uri);
-                engine.setLooping(repeat);
-                engine.setOnPreparedListener(mp -> {
-                    if (mp != audio) return;
-                    prepared = true;
-                    mp.start();
-                    playbackStatus.setText("جاهز • تشغيل الصوت");
-                    refreshProgress();
-                });
-                engine.setOnCompletionListener(mp -> onComplete());
-                engine.setOnErrorListener((mp, what, extra) -> {
-                    error("تعذر تشغيل الصوت أو أن صيغته غير مدعومة");
-                    return true;
-                });
-                engine.prepareAsync();
+                handler.postDelayed(() -> {
+                    if (player != null && videoMode && prepared
+                            && !firstVideoFrameRendered && index == selected) {
+                        playbackStatus.setText("الصوت يعمل لكن لم تظهر صورة؛ "
+                                + "قد تكون صيغة الفيديو غير مدعومة. جرّب MP4 H.264.");
+                    }
+                }, 6000L);
             }
-        } catch (Exception ex) {
-            error("تعذر فتح الملف: " + shortMessage(ex));
+        } catch (Exception exception) {
+            error("تعذّر فتح المقطع: " + shortMessage(exception));
         }
     }
 
@@ -400,27 +419,25 @@ public class PlayerActivity extends Activity {
     }
 
     private int getDuration() {
-        try { return Math.max(0, videoMode ? videoView.getDuration() : (audio == null ? 0 : audio.getDuration())); }
-        catch (Exception e) { return 0; }
+        if (player == null || !prepared) return 0;
+        long duration = player.getDuration();
+        return duration <= 0 ? 0 : (int) Math.min(Integer.MAX_VALUE, duration);
     }
 
     private int getPosition() {
-        try { return Math.max(0, videoMode ? videoView.getCurrentPosition() : (audio == null ? 0 : audio.getCurrentPosition())); }
-        catch (Exception e) { return 0; }
+        if (player == null || !prepared) return 0;
+        return (int) Math.min(Integer.MAX_VALUE,
+                Math.max(0L, player.getCurrentPosition()));
     }
 
     private boolean isPlaying() {
-        try { return prepared && (videoMode ? videoView.isPlaying() : audio != null && audio.isPlaying()); }
-        catch (Exception e) { return false; }
+        return player != null && prepared && player.isPlaying();
     }
 
     private void seekTo(int timeMs) {
-        if (!prepared) return;
+        if (!prepared || player == null) return;
         int clamped = Math.max(0, Math.min(getDuration(), timeMs));
-        try {
-            if (videoMode) videoView.seekTo(clamped);
-            else if (audio != null) audio.seekTo(clamped);
-        } catch (Exception ignored) { }
+        player.seekTo(clamped);
         refreshProgress();
     }
 
@@ -436,25 +453,19 @@ public class PlayerActivity extends Activity {
     }
 
     private void resume() {
-        if (!prepared) return;
-        try {
-            if (videoMode) videoView.start();
-            else if (audio != null) audio.start();
-            refreshProgress();
-        } catch (Exception ex) { error("تعذر استئناف التشغيل"); }
+        if (!prepared || player == null) return;
+        player.play();
+        refreshProgress();
     }
 
     private void pause() {
-        if (!prepared) return;
-        try {
-            if (videoMode) videoView.pause();
-            else if (audio != null) audio.pause();
-            refreshProgress();
-        } catch (Exception ignored) { }
+        if (!prepared || player == null) return;
+        player.pause();
+        refreshProgress();
     }
 
     private void togglePlayback() {
-        if (!prepared) return;
+        if (!prepared || player == null) return;
         if (isPlaying()) pause();
         else resume();
     }
@@ -463,18 +474,12 @@ public class PlayerActivity extends Activity {
         speedIndex = (speedIndex + 1) % speeds.length;
         float value = speeds[speedIndex];
         speedButton.setText("السرعة " + value + "×");
-        if (!prepared) return;
-        boolean playing = isPlaying();
-        try {
-            MediaPlayer mp = videoMode ? videoEngine : audio;
-            if (mp != null) {
-                PlaybackParams params = mp.getPlaybackParams();
-                params.setSpeed(value);
-                mp.setPlaybackParams(params);
-                if (!playing) pause();
+        if (player != null) {
+            try { player.setPlaybackSpeed(value); }
+            catch (Exception ex) {
+                Toast.makeText(this, "هذا الجهاز لا يدعم هذه السرعة",
+                        Toast.LENGTH_SHORT).show();
             }
-        } catch (Exception ex) {
-            Toast.makeText(this, "هذا الجهاز لا يدعم هذه السرعة", Toast.LENGTH_SHORT).show();
         }
     }
 
@@ -553,11 +558,11 @@ public class PlayerActivity extends Activity {
 
     @Override protected void onDestroy() {
         handler.removeCallbacksAndMessages(null);
-        if (audio != null) {
-            try { audio.reset(); audio.release(); } catch (Exception ignored) { }
-            audio = null;
+        if (videoView != null) videoView.setPlayer(null);
+        if (player != null) {
+            player.release();
+            player = null;
         }
-        if (videoView != null) videoView.stopPlayback();
         super.onDestroy();
     }
 
