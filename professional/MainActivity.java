@@ -91,6 +91,8 @@ public class MainActivity extends Activity {
     private boolean mediaOpened;
     private String lastSeenClipboard = "";
     private ClipboardDownloadPrompt clipboardPrompt;
+    private Button lastErrorButton;
+    private Button engineUpdateButton;
 
     private final BroadcastReceiver statusReceiver = new BroadcastReceiver() {
         @Override public void onReceive(Context context, Intent intent) {
@@ -125,6 +127,7 @@ public class MainActivity extends Activity {
         cancelButton.setOnClickListener(v -> cancelDownload());
         findViewById(R.id.btnOpenDownloads).setOnClickListener(v -> showPhoneMedia());
         addProfessionalPanels();
+        addDownloadDiagnostics();
         TouchEffects.installRecursively(findViewById(R.id.scrollRoot));
         animateFirstAppearance();
         clipboardPrompt = new ClipboardDownloadPrompt(this, new ClipboardDownloadPrompt.Actions() {
@@ -146,19 +149,99 @@ public class MainActivity extends Activity {
         });
         handleIncomingIntent(getIntent());
 
+        initializeAndRefreshEngine(false);
+    }
+
+    private void initializeAndRefreshEngine(boolean manual) {
+        if (DownloadService.running || analyzing) {
+            toast("انتظر اكتمال التنزيل قبل تحديث المحرك");
+            return;
+        }
+        ready = false;
+        updateActions();
+        statusText.setText(manual ? "جارٍ تحديث محرك التنزيل..."
+                : "جارٍ تجهيز محرك التنزيل وفحص التحديثات...");
+        if (engineUpdateButton != null) engineUpdateButton.setEnabled(false);
         executor.execute(() -> {
+            String engineStatus = "محرك التنزيل جاهز • تحسين الاعتمادية مفعّل";
+            boolean successfulInit = false;
             try {
                 YoutubeDL.getInstance().init(getApplicationContext());
                 FFmpeg.getInstance().init(getApplicationContext());
-                runOnUiThread(() -> {
-                    ready = true;
-                    if (!DownloadService.running) statusText.setText("المحرّك جاهز • الصيغة والجودة تلقائيتان");
-                    updateActions();
-                });
-            } catch (Exception e) {
-                runOnUiThread(() -> statusText.setText("خطأ في تهيئة محرّك التنزيل: " + message(e)));
+                successfulInit = true;
+
+                android.content.SharedPreferences prefs =
+                        getSharedPreferences("yt_dlp_updates", MODE_PRIVATE);
+                long now = System.currentTimeMillis();
+                long lastCheck = prefs.getLong("checked_at", 0L);
+                long fourDays = 4L * 24L * 60L * 60L * 1000L;
+                if (manual || lastCheck <= 0 || now - lastCheck > fourDays) {
+                    prefs.edit().putLong("checked_at", now).apply();
+                    try {
+                        YoutubeDL.UpdateStatus updated = YoutubeDL.getInstance()
+                                .updateYoutubeDL(getApplicationContext(), YoutubeDL.UpdateChannel._STABLE);
+                        if (updated != null) engineStatus = "محرك التنزيل محدّث وجاهز • " + updated;
+                    } catch (Exception updateError) {
+                        engineStatus = "تعذر فحص التحديث؛ المحرك الموجود متاح. "
+                                + message(updateError);
+                    }
+                }
+            } catch (Exception setupError) {
+                engineStatus = "تعذر تجهيز محرك التنزيل: " + message(setupError);
+            }
+            final boolean ok = successfulInit;
+            final String summary = engineStatus;
+            runOnUiThread(() -> {
+                ready = ok;
+                if (!DownloadService.running) statusText.setText(summary);
+                if (engineUpdateButton != null) engineUpdateButton.setEnabled(true);
+                updateActions();
+            });
+        });
+    }
+
+    private void addDownloadDiagnostics() {
+        if (!(statusText.getParent() instanceof LinearLayout)) return;
+        LinearLayout card = (LinearLayout) statusText.getParent();
+        int at = card.indexOfChild(statusText) + 1;
+        engineUpdateButton = new Button(this);
+        engineUpdateButton.setText("تحديث محرك تنزيل الفيديو");
+        engineUpdateButton.setAllCaps(false);
+        engineUpdateButton.setOnClickListener(v -> initializeAndRefreshEngine(true));
+        LinearLayout.LayoutParams first = new LinearLayout.LayoutParams(
+                LinearLayout.LayoutParams.MATCH_PARENT, dp(45));
+        first.topMargin = dp(8);
+        card.addView(engineUpdateButton, at, first);
+
+        lastErrorButton = new Button(this);
+        lastErrorButton.setText("نسخ تفاصيل آخر فشل");
+        lastErrorButton.setAllCaps(false);
+        lastErrorButton.setOnClickListener(v -> {
+            String error = getSharedPreferences("download_state", MODE_PRIVATE)
+                    .getString("last_error", "");
+            if (error == null || error.isEmpty()) {
+                toast("لم يسجل أي خطأ حتى الآن");
+                return;
+            }
+            ClipboardManager clipboard = (ClipboardManager) getSystemService(CLIPBOARD_SERVICE);
+            if (clipboard != null) {
+                clipboard.setPrimaryClip(ClipData.newPlainText("Jack Downloader Error", error));
+                toast("تم نسخ سبب الفشل لإرساله وإصلاحه");
             }
         });
+        LinearLayout.LayoutParams second = new LinearLayout.LayoutParams(
+                LinearLayout.LayoutParams.MATCH_PARENT, dp(45));
+        second.topMargin = dp(6);
+        card.addView(lastErrorButton, at + 1, second);
+        refreshErrorButton();
+    }
+
+    private void refreshErrorButton() {
+        if (lastErrorButton == null) return;
+        String error = getSharedPreferences("download_state", MODE_PRIVATE)
+                .getString("last_error", "");
+        lastErrorButton.setVisibility(error == null || error.isEmpty()
+                ? View.GONE : View.VISIBLE);
     }
 
     private void configureSpinner(Spinner spinner, String[] entries) {
@@ -177,10 +260,17 @@ public class MainActivity extends Activity {
 
     @Override protected void onResume() {
         super.onResume();
+        android.content.SharedPreferences state = getSharedPreferences("download_state", MODE_PRIVATE);
         if (DownloadService.running) {
-            android.content.SharedPreferences p = getSharedPreferences("download_state", MODE_PRIVATE);
-            showTransfer(p.getString("status", "جارٍ التنزيل..."), p.getInt("progress", 0), true);
-        } else updateActions();
+            showTransfer(state.getString("status", "جارٍ التنزيل..."), state.getInt("progress", 0), true);
+        } else {
+            String lastError = state.getString("last_error", "");
+            if (!lastError.isEmpty()) {
+                statusText.setText("آخر فشل: " + lastError);
+            }
+            updateActions();
+        }
+        refreshErrorButton();
         urlInput.postDelayed(() -> pasteLink(false), 180);
         if (clipboardPrompt != null) clipboardPrompt.resume();
         if (mediaOpened && hasMediaPermission()) loadPhoneMedia();
@@ -343,6 +433,7 @@ public class MainActivity extends Activity {
         if (!TextUtils.isEmpty(message)) statusText.setText(message);
         progressBar.setProgress(Math.max(0, Math.min(100, progress)));
         cancelButton.setEnabled(active);
+        refreshErrorButton();
         updateActions();
     }
 
