@@ -181,9 +181,12 @@ public class MainActivity extends Activity {
                         YoutubeDL.UpdateStatus updated = YoutubeDL.getInstance()
                                 .updateYoutubeDL(getApplicationContext(), YoutubeDL.UpdateChannel._STABLE);
                         if (updated != null) engineStatus = "محرك التنزيل محدّث وجاهز • " + updated;
-                    } catch (Exception updateError) {
-                        engineStatus = "تعذر فحص التحديث؛ المحرك الموجود متاح. "
-                                + message(updateError);
+                    } catch (Throwable updateError) {
+                        String cause = updateError.getMessage();
+                        if (cause == null || cause.isEmpty()) {
+                            cause = updateError.getClass().getSimpleName();
+                        }
+                        engineStatus = "تعذر فحص التحديث؛ المحرك الموجود متاح. " + cause;
                     }
                 }
             } catch (Exception setupError) {
